@@ -1,3 +1,5 @@
+"use strict"; /* jshint node: true, esversion: 6, asi: true */
+
 const fs      	= require('graceful-fs');
 const path    	= require('path');
 const pmx     	= require('pmx');
@@ -5,14 +7,14 @@ const pm2     	= require('pm2');
 const moment  	= require('moment-timezone');
 const scheduler	= require('node-schedule');
 const zlib      = require('zlib');
-const deepExtend = require('deep-extend');	
+const deepExtend = require('deep-extend');
 const publicIp = require('public-ip');
-const s3 = require('s3');
 
 var conf = pmx.initModule({
+  retain: 7,
   widget : {
     type             : 'generic',
-    logo             : 'https://raw.githubusercontent.com/sthnaqvi/pm2-logrotate-s3/master/pres/logo.png',
+    logo             : 'https://upload.wikimedia.org/wikipedia/commons/thumb/c/cd/Cloud_upload_font_awesome.svg/1000px-Cloud_upload_font_awesome.svg.png',
     theme            : ['#111111', '#1B2228', '#31C2F1', '#807C7C'],
     el : {
       probes  : false,
@@ -28,6 +30,20 @@ var conf = pmx.initModule({
   }
 });
 
+var   logger   = process.env.LOGDNA || conf.LOGDNA;
+if (logger) {
+  let hostname = require('os').hostname()
+  let MUSE_PATH = path.resolve(process.env.HOME, '.muse')
+  if (fs.existsSync(MUSE_PATH)) {
+    var USE = 'zzz'
+    var DCC = 'zzz'
+    try { USE = fs.readFileSync(path.resolve(MUSE_PATH, 'MUSE_USE', 'utf8')) } catch (e) {}
+    try { DCC = fs.readFileSync(path.resolve(MUSE_PATH, 'MUSE_DCC', 'utf8')) } catch (e) {}
+    hostname = `${USE}-muse-${DCC}`
+  }
+  logger     = require('logdna').createLogger(logger, { hostname })
+} // endif process.env.LOGDNA
+
 var PM2_ROOT_PATH = '';
 var Probe = pmx.probe();
 var SERVER_PUBLIC_IP;
@@ -39,11 +55,16 @@ else if (process.env.HOME && !process.env.HOMEPATH)
 else if (process.env.HOME || process.env.HOMEPATH)
   PM2_ROOT_PATH = path.resolve(process.env.HOMEDRIVE, process.env.HOME || process.env.HOMEPATH, '.pm2');
 
-try {
-  var customConfig = require(path.resolve(PM2_ROOT_PATH, 'pm2-logrotate-s3-config.json'));
-  conf = deepExtend(conf, customConfig);
-} catch (error) {
-  console.error('deepExtend pm2-logrotate-s3-config.json ERROR: ', error);
+let confPath = path.resolve(PM2_ROOT_PATH, 'pm2-logrotate-fwd-config.json')
+if (fs.existsSync(confPath)) {
+  try {
+    var customConf = require(confPath);
+    conf = deepExtend(conf, customConf);
+  } catch (error) {
+    console.log(`${confPath} fail:`, error.message);
+  }
+} else {
+  console.log(`${confPath} missing`);
 }
 
 if (process.env.SERVER_PUBLIC_IP && typeof process.env.SERVER_PUBLIC_IP === 'string') {
@@ -61,25 +82,30 @@ if (process.env.SERVER_PUBLIC_IP && typeof process.env.SERVER_PUBLIC_IP === 'str
   });
 }
 
-if (!conf.logBucketSetting || !conf.logBucketSetting.bucket || !conf.logBucketSetting.s3Path) {
-  return console.error('Not found logBucketSetting --> pm2-logrotate-s3-config.json in PM2 home folder');
+
+var s3client = false;
+
+if (conf.aws) {
+  if (!conf.logBucketSetting || !conf.logBucketSetting.bucket || !conf.logBucketSetting.s3Path) {
+    return console.error('Not found logBucketSetting --> pm2-logrotate-s3-config.json in PM2 home folder');
+  }
+
+  if (!conf.aws || !conf.aws.credentials || !conf.aws.credentials.accessKeyId || !conf.aws.credentials.secretAccessKey) {
+    return console.error('Not found aws credentials --> pm2-logrotate-s3-config.json in PM2 home folder');
+  }
+  const s3 = require('s3');
+  s3client = s3.createClient({
+    s3Options: {
+      accessKeyId: conf.aws.credentials.accessKeyId,
+      secretAccessKey: conf.aws.credentials.secretAccessKey,
+    },
+  });
 }
 
-if (!conf.aws || !conf.aws.credentials || !conf.aws.credentials.accessKeyId || !conf.aws.credentials.secretAccessKey) {
-  return console.error('Not found aws credentials --> pm2-logrotate-s3-config.json in PM2 home folder');
-}
-
-const s3client = s3.createClient({
-  s3Options: {
-    accessKeyId: conf.aws.credentials.accessKeyId,
-    secretAccessKey: conf.aws.credentials.secretAccessKey,
-  },
-});
-
-var WORKER_INTERVAL = isNaN(parseInt(conf.workerInterval)) ? 30 * 1000 : 
-                            parseInt(conf.workerInterval) * 1000; // default: 30 secs
+var WORKER_INTERVAL = isNaN(parseInt(conf.workerInterval)) ? 30 * 1000 :   // default: 30 secs
+                            parseInt(conf.workerInterval) * 1000; // seconds
 var SIZE_LIMIT = get_limit_size(); // default : 10MB
-var ROTATE_CRON = conf.rotateInterval || "0 0 * * *"; // default : every day at midnight
+var ROTATE_CRON = conf.rotateInterval || "/5 * * * * *"; // default : every 5 seconds
 var RETAIN = isNaN(parseInt(conf.retain)) ? undefined : parseInt(conf.retain); // All
 var COMPRESSION = JSON.parse(conf.compress) || false; // Do not compress by default
 var DATE_FORMAT = conf.dateFormat || 'YYYY-MM-DD_HH-mm-ss';
@@ -87,9 +113,10 @@ var TZ = conf.TZ;
 var ROTATE_MODULE = JSON.parse(conf.rotateModule) || true;
 var WATCHED_FILES = [];
 
+
 function get_limit_size() {
-  if (conf.max_size === '')
-    return (1024 * 1024 * 10);
+  if (!conf.max_size) return 1;
+//    return (1024 * 1024 * 10);
   if (typeof(conf.max_size) !== 'string')
       conf.max_size = conf.max_size + "";
   if (conf.max_size.slice(-1) === 'G')
@@ -99,7 +126,8 @@ function get_limit_size() {
   if (conf.max_size.slice(-1) === 'K')
     return (parseInt(conf.max_size) * 1024);
   return parseInt(conf.max_size);
-}
+} // get_limit_size()
+
 
 const putFileToS3 = (local_file_path, s3_file_path, s3_bucket) => new Promise((resolve, reject) => {
   const params = {
@@ -109,10 +137,34 @@ const putFileToS3 = (local_file_path, s3_file_path, s3_bucket) => new Promise((r
       Key: s3_file_path
     }
   };
-  const uploader = s3client.uploadFile(params);
-  uploader.on('error', error => reject(error));
-  uploader.on('end', () => resolve(''));
-});
+  if (s3client) {
+    const uploader = s3client.uploadFile(params);
+    uploader.on('error', error => reject(error));
+    uploader.on('end', () => resolve(''));
+  } else {
+    resolve('')
+  }
+}); // putFileToS3()
+
+
+const putLogDna = (local_file_path) => new Promise((resolve, reject) => {
+  if (logger) {
+    fs.readFile(local_file_path, 'utf8', function(data) {
+      let app   = path.fileBaseName(local_file_path, '.log')
+      let lines = data.split("\n")
+      for (let i in lines) {
+        let line = lines[i];
+        if (line && line.length > 0) {
+          logger.log(line, { app })
+        }
+      }
+      resolve('')
+    })
+  } else {
+    resolve('')
+  }
+}) // putLogDna()
+
 
 function putOldFileToS3AndDeletedFromLocal(file) {
   if (file === "/dev/null") return;
@@ -142,8 +194,10 @@ function putOldFileToS3AndDeletedFromLocal(file) {
           .replace(/__filename__/, rotated_files[i])
           .replace(/__epoch__/, moment_date.toDate().getTime())
           }`;
-        console.log('S3 File Path: ', s3_file_path);
-        putFileToS3(local_file_path, s3_file_path, conf.logBucketSetting.bucket)
+        if (s3client) console.log('S3 File Path: ', s3_file_path);
+        putLogDna(local_file_path)
+        .then(() => {
+          putFileToS3(local_file_path, s3_file_path, conf.logBucketSetting.bucket)
           .then(() => {
             fs.unlink(local_file_path, function (err) {
               if (err) return console.error(err);
@@ -151,17 +205,20 @@ function putOldFileToS3AndDeletedFromLocal(file) {
             });
           }).catch((error) => {
             console.error(JSON.stringify(error));
-          })
+          }) // putFileToS3.catch()
+        }).catch((error) => {
+          console.error(JSON.stringify(error));
+        }) // putLogDna.catch()
       })(i);
     }
   });
-}
+} // putOldFileToS3AndDeletedFromLocal()
 
 
 /**
  * Apply the rotation process of the log file.
  *
- * @param {string} file 
+ * @param {string} file
  */
 function proceed(file) {
   // set default final time
@@ -188,9 +245,9 @@ function proceed(file) {
   // pipe all stream
   if (COMPRESSION)
     readStream.pipe(GZIP).pipe(writeStream);
-  else 
+  else
     readStream.pipe(writeStream);
-  
+
 
   // listen for error
   readStream.on('error', pmx.notify.bind(pmx));
@@ -210,22 +267,22 @@ function proceed(file) {
       if (err) return pmx.notify(err);
       console.log('"' + final_name + '" has been created');
 
-      if (typeof(RETAIN) === 'number') 
+      if (typeof(RETAIN) === 'number')
         putOldFileToS3AndDeletedFromLocal(file);
     });
   });
-}
+} // proceed()
 
 
 /**
  * Apply the rotation process if the `file` size exceeds the `SIZE_LIMIT`.
- * 
+ *
  * @param {string} file
  * @param {boolean} force - Do not check the SIZE_LIMIT and rotate everytime.
  */
 function proceed_file(file, force) {
   if (!fs.existsSync(file)) return;
-  
+
   if (!WATCHED_FILES.includes(file)) {
     WATCHED_FILES.push(file);
   }
@@ -233,15 +290,15 @@ function proceed_file(file, force) {
   fs.stat(file, function (err, data) {
     if (err) return console.error(err);
 
-    if (data.size > 0 && (data.size >= SIZE_LIMIT || force)) 
+    if (data.size > 0 && (data.size >= SIZE_LIMIT || force))
       proceed(file);
   });
-}
+} // proceed_file()
 
 
 /**
  * Apply the rotation process of all log files of `app` where the file size exceeds the`SIZE_LIMIT`.
- * 
+ *
  * @param {Object} app
  * @param {boolean} force - Do not check the SIZE_LIMIT and rotate everytime.
  */
@@ -257,7 +314,8 @@ function proceed_app(app, force) {
   if (app.pm2_env.pm_log_path && app.pm2_env.pm_log_path !== app.pm2_env.pm_out_log_path && app.pm2_env.pm_log_path !== app.pm2_env.pm_err_log_path) {
     proceed_file(app.pm2_env.pm_log_path, force);
   }
-}
+} // proceed_app()
+
 
 // Connect to local PM2
 pm2.connect(function(err) {
@@ -277,9 +335,9 @@ pm2.connect(function(err) {
 
           // if apps instances are multi and one of the instances has rotated, ignore
           if(app.pm2_env.instances > 1 && appMap[app.name]) return;
-          
+
           appMap[app.name] = app;
-          
+
           proceed_app(app, false);
       });
     });
@@ -288,6 +346,7 @@ pm2.connect(function(err) {
     proceed_file(PM2_ROOT_PATH + '/pm2.log', false);
     proceed_file(PM2_ROOT_PATH + '/agent.log', false);
   }, WORKER_INTERVAL);
+
 
   // register the cron to force rotate file
   scheduler.scheduleJob(ROTATE_CRON, function () {
@@ -312,6 +371,7 @@ pm2.connect(function(err) {
   });
 });
 
+
 /**  ACTION PMX **/
 pmx.action('list watched logs', function(reply) {
   var returned = {};
@@ -320,6 +380,7 @@ pmx.action('list watched logs', function(reply) {
   });
   return reply(returned);
 });
+
 
 pmx.action('list all logs', function(reply) {
   var returned = {};
@@ -337,6 +398,7 @@ pmx.action('list all logs', function(reply) {
   });
 });
 
+
 /** PROB PMX **/
 var metrics = {};
 metrics.totalsize = Probe.metric({
@@ -348,6 +410,7 @@ metrics.totalcount = Probe.metric({
     name  : 'Files count',
     value : 'N/A'
 });
+
 
 // update folder size of logs every 10secs
 function updateFolderSizeProbe() {
@@ -367,7 +430,8 @@ function updateFolderSizeProbe() {
   });
 }
 updateFolderSizeProbe();
-setInterval(updateFolderSizeProbe, 30000);
+setInterval(updateFolderSizeProbe, WORKER_INTERVAL);
+
 
 // update file count every 10secs
 function updateFileCountProbe() {
@@ -381,7 +445,8 @@ function updateFileCountProbe() {
   });
 }
 updateFileCountProbe();
-setInterval(updateFileCountProbe, 30000);
+setInterval(updateFileCountProbe, WORKER_INTERVAL);
+
 
 function handleUnit(bytes, precision) {
   var kilobyte = 1024;
@@ -402,4 +467,12 @@ function handleUnit(bytes, precision) {
   } else {
     return bytes + ' B';
   }
+}
+
+
+if (process.env.TEST) {
+  setTimeout(function(){
+    console.log('TEST HALT')
+    process.exit(0)
+  }, 999)
 }
