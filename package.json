@@ -1,6 +1,6 @@
 {
   "name": "pm2-logrotate-fwd",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Rotate pm2 logs, optional forward to s3 and/or logdna",
   "main": "app.js",
   "dependencies": {

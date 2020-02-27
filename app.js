@@ -11,7 +11,6 @@ const deepExtend = require('deep-extend');
 const publicIp = require('public-ip');
 
 var conf = pmx.initModule({
-  retain: 7,
   widget : {
     type             : 'generic',
     logo             : 'https://upload.wikimedia.org/wikipedia/commons/thumb/c/cd/Cloud_upload_font_awesome.svg/1000px-Cloud_upload_font_awesome.svg.png',
@@ -102,14 +101,14 @@ if (conf.aws) {
   });
 }
 
-var WORKER_INTERVAL = isNaN(parseInt(conf.workerInterval)) ? 30 * 1000 :   // default: 30 secs
+var WORKER_INTERVAL = isNaN(parseInt(conf.workerInterval)) ? 3 * 1000 :   // default: 3 secs
                             parseInt(conf.workerInterval) * 1000; // seconds
-var SIZE_LIMIT = get_limit_size(); // default : 10MB
-var ROTATE_CRON = conf.rotateInterval || "/5 * * * * *"; // default : every 5 seconds
-var RETAIN = isNaN(parseInt(conf.retain)) ? undefined : parseInt(conf.retain); // All
+var SIZE_LIMIT  = get_limit_size(); // default : 10MB
+var ROTATE_CRON = conf.rotateInterval || "/3 * * * * *"; // default : every 3 seconds
+var RETAIN      = isNaN(parseInt(conf.retain)) ? 1 : parseInt(conf.retain); // retain 1
 var COMPRESSION = JSON.parse(conf.compress) || false; // Do not compress by default
-var DATE_FORMAT = conf.dateFormat || 'YYYY-MM-DD_HH-mm-ss';
-var TZ = conf.TZ;
+var DATE_FORMAT = conf.dateFormat || 'YYYYMMDD_HHmmss';
+var TZ          = conf.TZ;
 var ROTATE_MODULE = JSON.parse(conf.rotateModule) || true;
 var WATCHED_FILES = [];
 
